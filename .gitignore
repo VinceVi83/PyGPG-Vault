@@ -1,0 +1,37 @@
+# --- Security & Keys (CRITICAL) ---
+# Never commit your private or public keys
+*.asc
+*.key
+*.pub
+
+# Never commit your backup archives
+*.zip
+*.tar.gz
+*.7z
+
+# --- Database ---
+# It is safer to keep your encrypted vault out of Git
+.vault.gpg
+
+# --- Python ---
+# Python bytecode and cache
+__pycache__/
+*.py[cod]
+*$py.class
+.venv
+venv/
+ENV/
+
+# --- System Files ---
+# macOS system files
+.DS_Store
+
+# Windows system files
+Thumbs.db
+ehthumbs.db
+desktop.ini
+
+# Linux temporary files
+*~
+.fuse_hidden*
+.aider*
