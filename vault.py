@@ -1,5 +1,14 @@
 #!/usr/bin/env python3
-import os, subprocess, getpass, sys, difflib, secrets, string, time, shutil
+
+# Copyright 2026 VinceVi83 <vincent@nguyen.lt>
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+
+import os, subprocess, getpass, sys, difflib, secrets, string, time, shutil, json
 from datetime import datetime
 
 # CONFIGURATION
@@ -16,13 +25,26 @@ RECIPIENT = "your@mail.com"
 # gpg --edit-key "your@mail.com" -> trust -> 5 -> y -> quit
 
 class VaultManager:
-    """
-    Class to manage the vault operations.
+    """Vault Manager Class
+    
+    Role: Manages vault operations including secure password generation, clipboard operations, and GPG encrypted storage.
+    
+    Methods:
+        generate_secure_password(length=20) : Generate a secure password with a given length.
+        smart_copy(text) : Support clipboard operations across platforms.
+        secure_exit() : Clear the clipboard and exit the program.
+        _select_entry(data, search_term=None, action="select") : Centralized search engine for display, edit, and delete.
+        display_vault(data, search_term, force_visual=False) : Display vault entries.
+        edit_entry(data) : Edit a vault entry.
+        delete_entry(data) : Delete a vault entry.
+        get_confirmed_password() : Generate and confirm a secure password with dynamic length support.
+        load_vault() : Load the vault from encrypted file.
+        save_vault(data_list) : Save the vault to encrypted file.
+        _perform_migration(stdout) : Internal helper to convert legacy text format to JSON objects.
     """
 
     @staticmethod
     def generate_secure_password(length=20):
-        """Generate a secure password with a given length."""
         alphabet = string.ascii_letters + string.digits + "!@#$%^&*"
         while True:
             pwd = ''.join(secrets.choice(alphabet) for _ in range(length))
@@ -32,7 +54,6 @@ class VaultManager:
 
     @staticmethod
     def smart_copy(text):
-        """Support: Windows(WSL), Android, macOS, Linux(X11/Wayland), iOS."""
         try:
             if shutil.which("clip.exe"):
                 process = subprocess.Popen(['clip.exe'], stdin=subprocess.PIPE)
@@ -61,35 +82,7 @@ class VaultManager:
         return None
 
     @staticmethod
-    def load_vault():
-        if not os.path.exists(VAULT_FILE):
-            return []
-        try:
-            result = subprocess.run(
-                ['gpg', '--decrypt', '--quiet', '--batch', '--use-agent', VAULT_FILE],
-                capture_output=True, text=True, check=False
-            )
-            if result.returncode != 0:
-                print("[*] Authentication required.")
-                passphrase = getpass.getpass("GPG Passphrase: ")
-                proc = subprocess.Popen(
-                    ['gpg', '--decrypt', '--quiet', '--batch', '--no-tty', '--yes', 
-                    '--pinentry-mode', 'loopback', '--passphrase-fd', '0', VAULT_FILE],
-                    stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
-                )
-                stdout, stderr = proc.communicate(input=passphrase)
-                if proc.returncode != 0:
-                    print(f"\n[!] GPG Error: {stderr.strip()}")
-                    return None
-                return [l for l in stdout.splitlines() if l.strip()]
-            return [l for l in result.stdout.splitlines() if l.strip()]
-        except Exception as e:
-            print(f"[!] System Error: {e}")
-            return None
-
-    @staticmethod
     def secure_exit():
-        """Clear the clipboard and exit the program."""
         VaultManager.smart_copy("")
         os.system('clear' if os.name == 'posix' else 'cls')
         print("\n[!] Vault closed & clipboard cleared.")
@@ -103,57 +96,70 @@ class VaultManager:
         sys.exit(0)
 
     @staticmethod
-    def save_vault(lines_list):
-        """Save the vault to a GPG-encrypted file."""
-        new_data = "\n".join(lines_list) + "\n"
-        subprocess.run(['gpg', '--encrypt', '--recipient', RECIPIENT, '--armor', '--yes', '--batch', '--output', VAULT_FILE], input=new_data, text=True, check=True)
+    def _select_entry(data, search_term=None, action="select"):
+        if not data:
+            print("[!] Vault is empty.")
+            return None
 
-    @staticmethod
-    def display_vault(lines, search_term, force_visual=False):
-        """Display the vault entries, optionally filtering by search term."""
-        names = [l.split('|')[0].strip() for l in lines]
+        if search_term is None:
+            prompt = f"Search service to {action} (Leave empty to list all): "
+            search_term = input(prompt).strip()
+            
+            if not search_term:
+                print(f"\n--- Available services to {action} ---")
+                for i, e in enumerate(data, 1):
+                    print(f" [{i:2}] {e['service']}")
+                
+                sel = input(f"\nSelect number to {action} (or Enter to cancel): ").strip()
+                if sel.isdigit() and 0 < int(sel) <= len(data):
+                    return int(sel) - 1
+                return None
+
+        names = [entry['service'] for entry in data]
         
-        target_idx = None
         if search_term.isdigit():
             idx = int(search_term) - 1
-            if 0 <= idx < len(lines):
-                target_idx = idx
+            return idx if 0 <= idx < len(data) else None
 
-        if target_idx is None:
-            matches = [i for i, n in enumerate(names) if search_term.lower() in n.lower()]
+        matches = [i for i, n in enumerate(names) if search_term.lower() in n.lower()]
+        
+        if not matches:
+            close_names = difflib.get_close_matches(search_term, names, n=3, cutoff=0.6)
+            matches = [names.index(c) for c in close_names]
+
+        if not matches:
+            print(f"[!] No service found matching '{search_term}'.")
+            return None
+
+        if len(matches) == 1:
+            return matches[0]
+        
+        print(f"\nMultiple matches found for '{search_term}':")
+        for i, idx in enumerate(matches, 1):
+            print(f" [{i}] {names[idx]} (User: {data[idx]['user']})")
+        
+        sel = input(f"\nSelect number to {action} (or Enter to cancel): ").strip()
+        if sel.isdigit() and 0 < int(sel) <= len(matches):
+            return matches[int(sel)-1]
+        
+        return None
+
+    @staticmethod
+    def display_vault(data, search_term, force_visual=False):
+        idx = VaultManager._select_entry(data, search_term, "display")
+        if idx is not None:
+            entry = data[idx]
+            print(f"\nService: {entry['service']} | User: {entry['user']}")
+            if 'updated_at' in entry:
+                print(f"Last updated: {entry['updated_at']}")
             
-            if not matches:
-                close_names = difflib.get_close_matches(search_term, names, n=3, cutoff=0.6)
-                matches = [names.index(c) for c in close_names]
-
-            if not matches:
-                print("[!] No service found.")
-                return
-
-            if len(matches) == 1:
-                target_idx = matches[0]
-            else:
-                print("\nMultiple matches found:")
-                for i, idx in enumerate(matches, 1):
-                    print(f" [{i}] {names[idx]}")
-                sel = input("\nSelect number (or Enter to cancel): ")
-                if sel.isdigit() and 0 < int(sel) <= len(matches):
-                    target_idx = matches[int(sel)-1]
-
-        if target_idx is not None:
-            parts = [p.strip() for p in lines[target_idx].split('|')]
-            pwd = parts[2].split('PWD:')[1].strip() if 'PWD:' in parts[2] else parts[2]
-            print(f"\nService: {parts[0]} | User: {parts[1]}")
-            
+            pwd = entry['password']
             if force_visual:
-                print(f"PASSWORD (Visual Mode) : {pwd}")
+                print(f"PASSWORD: {pwd}")
                 VaultManager.smart_copy("")
             else:
                 env = VaultManager.smart_copy(pwd)
-                if env:
-                    print(f"[OK] Copied to {env}.")
-                else:
-                    print(f"PASSWORD (Legacy Mode) : {pwd}")
+                print(f"[OK] Copied to {env}.") if env else print(f"PASSWORD: {pwd}")
 
             try:
                 time.sleep(15)
@@ -162,64 +168,38 @@ class VaultManager:
                 VaultManager.secure_exit()
 
     @staticmethod
-    def edit_entry(lines):
-        """Edit an entry in the vault."""
-        for i, l in enumerate(lines, 1): 
-            print(f"[{i}] {l.split('|')[0].strip()}")
-        
-        try:
-            choice = input("Edit number: ")
-            if not choice: return
-            idx = int(choice) - 1
+    def edit_entry(data):
+        idx = VaultManager._select_entry(data, None, "edit")
+        if idx is not None:
+            entry = data[idx]
+            print(f"\n--- Editing: {entry['service']} ---")
+            entry['service'] = input(f"New Service [{entry['service']}]: ") or entry['service']
+            entry['user'] = input(f"New User [{entry['user']}]: ") or entry['user']
             
-            if 0 <= idx < len(lines):
-                parts = [x.strip() for x in lines[idx].split('|')]
-                current_service = parts[0]
-                current_user = parts[1].replace("User:", "").strip() if "User:" in parts[1] else parts[1]
-                
-                print(f"\n--- Editing: {current_service} ---")
-
-                new_service = input(f"New Service Name [{current_service}]: ") or current_service
-                new_usr = input(f"New User [{current_user}]: ") or current_user
-                pwd = VaultManager.get_confirmed_password()
-
-                lines[idx] = f"{new_service} | User: {new_usr} | PWD: {pwd}"
-                VaultManager.save_vault(lines)
-                print(f"\n[+] '{new_service}' has been successfully updated.")
-        except ValueError:
-            print("[!] Invalid number.")
+            if input("Change password? (y/N): ").lower() == 'y':
+                entry['password'] = VaultManager.get_confirmed_password()
+            
+            entry['updated_at'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            VaultManager.save_vault(data)
+            print(f"[+] '{entry['service']}' updated.")
 
     @staticmethod
-    def delete_entry(lines):
-        """Delete an entry from the vault."""
-        if not lines:
-            print("[!] The vault is empty.")
-            return
-
-        for i, l in enumerate(lines, 1):
-            print(f"[{i:2}] {l.split('|')[0].strip()}")
-    
-        try:
-            idx_input = input("\nNumber to delete (or Enter to cancel) : ").strip()
-            if not idx_input: return
-        
-            idx = int(idx_input) - 1
-            if 0 <= idx < len(lines):
-                service_name = lines[idx].split('|')[0].strip()
-                confirm = input(f"[?] Delete '{service_name}' permanently? (y/N) : ").lower().strip()
+    def delete_entry(data):
+        idx = VaultManager._select_entry(data, None, "DELETE")
+        if idx is not None:
+            entry = data[idx]
+            print(f"\n[!] WARNING: You are about to delete {entry['service']} ({entry['user']})")
+            confirm = input(f"Confirm permanent deletion of '{entry['service']}'? (y/N): ").lower().strip()
             
-                if confirm == 'y':
-                    lines.pop(idx)
-                    VaultManager.save_vault(lines)
-                    print(f"[+] '{service_name}' has been deleted.")
-                else:
-                    print("[*] Deletion cancelled.")
-        except ValueError:
-            print("[!] Please enter a valid number.")
+            if confirm == 'y':
+                data.pop(idx)
+                VaultManager.save_vault(data)
+                print(f"[+] '{entry['service']}' deleted.")
+            else:
+                print("[*] Deletion cancelled.")
 
     @staticmethod
     def get_confirmed_password():
-        """Generate and confirm a secure password with dynamic length support."""
         current_length = 25
         while True:
             candidate = VaultManager.generate_secure_password(current_length)
@@ -239,62 +219,154 @@ class VaultManager:
                 VaultManager.secure_exit()
             elif choice == 'manual': 
                 return getpass.getpass("Enter password: ")
+    
+    @staticmethod
+    def load_vault():
+        if not os.path.exists(VAULT_FILE):
+            return []
+        
+        try:
+            result = subprocess.run(
+                ['gpg', '--decrypt', '--quiet', '--batch', '--use-agent', VAULT_FILE],
+                capture_output=True, text=True, check=False
+            )
+            
+            stdout = result.stdout
+            
+            if result.returncode != 0:
+                print("[*] Authentication required.")
+                passphrase = getpass.getpass("GPG Passphrase: ")
+                proc = subprocess.Popen(
+                    ['gpg', '--decrypt', '--quiet', '--batch', '--no-tty', '--yes', 
+                    '--pinentry-mode', 'loopback', '--passphrase-fd', '0', VAULT_FILE],
+                    stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+                )
+                stdout, stderr = proc.communicate(input=passphrase)
+                if proc.returncode != 0:
+                    print(f"\n[!] GPG Error: {stderr.strip()}")
+                    return None
+
+            if not stdout.strip():
+                return []
+                
+            try:
+                return json.loads(stdout)
+            except json.JSONDecodeError:
+                return VaultManager._perform_migration(stdout)
+                
+        except Exception as e:
+            print(f"[!] System Error: {e}")
+            return None
+
+    @staticmethod
+    def save_vault(data_list):
+        if os.path.exists(VAULT_FILE):
+            backup_file = VAULT_FILE + ".bak"
+            shutil.copy2(VAULT_FILE, backup_file)
+        
+        try:
+            json_data = json.dumps(data_list, indent=2)
+            
+            process = subprocess.run(
+                ['gpg', '--encrypt', '--recipient', RECIPIENT, '--armor', '--yes', '--batch', '--output', VAULT_FILE],
+                input=json_data, 
+                text=True, 
+                capture_output=True,
+                check=True
+            )
+            print(f"\n[+] Vault synchronized successfully.")
+            
+        except subprocess.CalledProcessError as e:
+            print(f"\n[!] CRITICAL ERROR during encryption: {e.stderr}")
+            print("[!] The .bak backup has been preserved. Check your GPG keys.")
+        except Exception as e:
+            print(f"\n[!] Unexpected error during save: {e}")
+
+    @staticmethod
+    def _perform_migration(stdout):
+        """Internal helper to convert legacy text format to JSON objects."""
+        print("[!] Legacy format detected. Migrating to JSON structure...")
+        migrated_data = []
+        for line in stdout.splitlines():
+            if not line.strip(): continue
+            try:
+                parts = [p.strip() for p in line.split('|')]
+                svc = parts[0]
+                usr = parts[1].replace("User:", "").strip() if len(parts) > 1 else "Unknown"
+                pwd = parts[2].replace("PWD:", "").strip() if len(parts) > 2 else ""
+                
+                migrated_data.append({
+                    "service": svc,
+                    "user": usr,
+                    "password": pwd,
+                    "updated_at": datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                })
+            except Exception:
+                continue
+        
+        if migrated_data:
+            VaultManager.save_vault(migrated_data)
+            print("[+] Migration complete. Vault is now in JSON format.")
+        return migrated_data
 
 def main():
-    """Main function to handle user interactions."""
+    data = VaultManager.load_vault()
+    if data is None: return
+
     try:
         script_path = os.path.realpath(__file__)
-        vault_path = os.path.realpath(VAULT_FILE)
-        mtime_script = datetime.fromtimestamp(os.path.getmtime(script_path)).strftime('%Y-%m-%d %H:%M')
-        print(f"Script updated : {mtime_script}")
-        if os.path.exists(vault_path):
-            mtime_vault = datetime.fromtimestamp(os.path.getmtime(vault_path)).strftime('%Y-%m-%d %H:%M')
-            print(f"Vault updated  : {mtime_vault}")
-    except Exception as e:
-        print(f"Status: Error retrieving dates ({e})")
+        if os.path.exists(script_path):
+            mtime = datetime.fromtimestamp(os.path.getmtime(script_path)).strftime('%Y-%m-%d %H:%M')
+            print(f"Script updated : {mtime}")
 
-    lines = VaultManager.load_vault()
-    if lines is None: return
-    try:
         if len(sys.argv) > 1:
-            visual = "-v" in sys.argv or "--visual" in sys.argv
-            
-            args_clean = [a for a in sys.argv[1:] if a not in ["-v", "--visual"]]
-            
-            if args_clean:
-                VaultManager.display_vault(lines, args_clean[0], force_visual=visual)
+            vis = "-v" in sys.argv or "--visual" in sys.argv
+            args = [a for a in sys.argv[1:] if a not in ["-v", "--visual"]]
+            if args:
+                VaultManager.display_vault(data, args[0], force_visual=vis)
                 return
-            elif visual:
-                print("[!] Visual mode activated. Choose a service from the list :")
-                for i, l in enumerate(lines, 1): print(f"[{i:2}] {l.split('|')[0].strip()}")
-                term = input("\nSearch/Number : ")
-                VaultManager.display_vault(lines, term, force_visual=True)
+            elif vis:
+                print("[!] Visual mode activated. Choose a service:")
+                for i, e in enumerate(data, 1): 
+                    print(f"[{i:2}] {e['service']}")
+                term = input("\nSearch/Number: ")
+                VaultManager.display_vault(data, term, force_visual=True)
                 return
 
         print(f"\n[1] List [2] Add [3] Edit [4] Del [q] Quit")
         c = input("> ").lower().strip()
 
         if c == '1':
-            for i, l in enumerate(lines, 1): print(f"[{i}] {l.split('|')[0].strip()}")
+            for i, e in enumerate(data, 1): 
+                print(f"[{i}] {e['service']}")
             term = input("\nSearch/Number: ")
-            VaultManager.display_vault(lines, term)
+            VaultManager.display_vault(data, term)
         elif c == '2':
-            svc = input("Service: "); usr = input("User: ")
+            svc = input("Service: ")
+            if any(e['service'].lower() == svc.lower() for e in data):
+                print(f"[!] Warning: '{svc}' already exists. Use Edit instead.")
+                return
+            usr = input("User: ")
             pwd = VaultManager.get_confirmed_password()
-            lines.append(f"{svc} | User: {usr} | PWD: {pwd}")
-            VaultManager.save_vault(lines)
+            data.append({
+                "service": svc,
+                "user": usr,
+                "password": pwd,
+                "updated_at": datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            })
+            VaultManager.save_vault(data)
         elif c == '3':
-            VaultManager.edit_entry(lines)
+            VaultManager.edit_entry(data)
         elif c == '4':
-            VaultManager.delete_entry(lines)
+            VaultManager.delete_entry(data)
         elif c == 'q':
             subprocess.run(['gpgconf', '--reload', 'gpg-agent'])
             VaultManager.secure_exit()
         else:
-            VaultManager.display_vault(lines, c)
+            VaultManager.display_vault(data, c)
 
     except KeyboardInterrupt:
-                VaultManager.secure_exit()
+        VaultManager.secure_exit()
 
 if __name__ == "__main__":
     main()
