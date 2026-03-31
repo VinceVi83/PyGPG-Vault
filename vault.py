@@ -54,10 +54,11 @@ class VaultManager:
 
     @staticmethod
     def smart_copy(text):
+        text = text.strip().replace('\ufeff', '')
         try:
             if shutil.which("clip.exe"):
                 process = subprocess.Popen(['clip.exe'], stdin=subprocess.PIPE)
-                process.communicate(input=text.encode('utf-16'))
+                process.communicate(input=text.encode('utf-16-le'))
                 return "Windows"
             elif shutil.which("pbcopy"):
                 process = subprocess.Popen(['pbcopy'], stdin=subprocess.PIPE)
