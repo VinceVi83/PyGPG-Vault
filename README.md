@@ -2,7 +2,7 @@
 Minimalist, secure, and cross-platform password manager powered by GPG encryption. No cloud.
 
 ## Features
-* **Strong Encryption**: GnuPG (GPG) protection at rest.
+* **Hybrid Encryption**: Individual GPG-encrypted files for each secret, plus a central index for metadata.
 * **Auto-Gen**: 25-character complex passwords generated on the fly.
 * **Smart Search**: Find by name, index, or difflib matching.
 * **Auto-Cleanup**: Clipboard and terminal cleared after 15s.
@@ -17,10 +17,12 @@ Minimalist, secure, and cross-platform password manager powered by GPG encryptio
 3. **Disaster Recovery**:
    * If you lose your `.vault.gpg` or fail your password entry three times (depending on your GPG agent settings), your access is locked or destroyed. 
    * Always keep a backup copy of `.vault.gpg` in a different "sync repertory" to restore it if an accident happens.
-4. **Folder Separation (Propagation Logic)**: 
-   * **Keep your Originals Offline**: Maintain your primary `.vault.gpg` in a secure, non-synced folder.
-   * **Propagate Copies Only**: When you want to update your devices, manually copy the vault to your Syncthing folder.
-   * **Sync Content**: Only sync the vault and the script. Keep keys and backups strictly offline and separate to avoid accidental exposure or sync conflicts.
+4. **Folder Separation & Propagation Logic (Hybrid System)**: 
+   * **Sync Requirements**: You must now synchronize **both** the main index file (`~/.vault.gpg`) and the entire keys directory (`~/.vault_keys/`) for the vault to function across devices.
+   * **Keep your Originals Offline**: Maintain your primary master GPG private keys and original backups in a secure, non-synced physical location (e.g., an encrypted USB drive).
+   * **Propagate Copies Only**: When updating your mobile devices or secondary PCs, manually copy your current `~/.vault.gpg` file and the `~/.vault_keys/` folder into your Syncthing shared directory.
+   * **One-Shot Workflow**: The script is optimized for "one-shot" execution. It performs the requested action (Autotype or Pinentry) and then automatically clears the terminal and exits to ensure no sensitive data remains in memory.
+   * **Sync Integrity**: Always wait for Syncthing to fully complete the propagation of the `~/.vault_keys/` folder before attempting to access new entries on a different device to avoid decryption errors.
 
 4. **Important Notes**:
     * Mobile/Termux: The automatic 'cachetime' is often unreliable due to aggressive OS power management.

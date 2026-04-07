@@ -8,12 +8,15 @@
 #
 #     http://www.apache.org/licenses/LICENSE-2.0
 
-import os, subprocess, getpass, sys, difflib, secrets, string, time, shutil, json
+import os, subprocess, getpass, sys, difflib, secrets, string, time, shutil, json, hashlib
 from datetime import datetime
 
 # CONFIGURATION
 # Note: On Ubuntu, ~/.vault.gpg is used. On Android, check the path.
 VAULT_FILE = os.path.expanduser("~/.vault.gpg")
+KEYS_DIR = os.path.expanduser("~/.vault_keys/")
+if not os.path.exists(KEYS_DIR):
+    os.makedirs(KEYS_DIR, mode=0o700)
 RECIPIENT = "your@mail.com"
 
 # ln -s ~/storage/document/SyncDir/.vault.gpg ~/.vault.gpg
@@ -30,6 +33,8 @@ class VaultManager:
     Role: Manages vault operations including secure password generation, clipboard operations, and GPG encrypted storage.
     
     Methods:
+        save_password_file(filename, password) : Encrypt and save a password to the vault.
+        load_password_file(filename) : Decrypt and load a password from the vault.
         generate_secure_password(length=20) : Generate a secure password with a given length.
         smart_copy(text) : Support clipboard operations across platforms.
         secure_exit() : Clear the clipboard and exit the program.
@@ -38,10 +43,28 @@ class VaultManager:
         edit_entry(data) : Edit a vault entry.
         delete_entry(data) : Delete a vault entry.
         get_confirmed_password() : Generate and confirm a secure password with dynamic length support.
-        load_vault() : Load the vault from encrypted file.
-        save_vault(data_list) : Save the vault to encrypted file.
+        load_vault() : Decrypts GPG vault to JSON, handling agent cache or passphrase prompts.
+        save_vault(data_list) : Encrypts JSON data via GPG and creates a safety .bak backup.
         _perform_migration(stdout) : Internal helper to convert legacy text format to JSON objects.
+        add_entry(data) : Add a new vault entry.
     """
+    
+    @staticmethod
+    def save_password_file(filename, password):
+        filepath = os.path.join(KEYS_DIR, filename)
+        subprocess.run(
+            ['gpg', '--encrypt', '--recipient', RECIPIENT, '--armor', '--yes', '--batch', '--output', filepath],
+            input=password, text=True, capture_output=True, check=True
+        )
+
+    @staticmethod
+    def load_password_file(filename):
+        filepath = os.path.join(KEYS_DIR, filename)
+        result = subprocess.run(
+            ['gpg', '--decrypt', '--quiet', '--batch', '--use-agent', filepath],
+            capture_output=True, text=True, check=True
+        )
+        return result.stdout.strip()
 
     @staticmethod
     def generate_secure_password(length=20):
@@ -154,19 +177,57 @@ class VaultManager:
             if 'updated_at' in entry:
                 print(f"Last updated: {entry['updated_at']}")
             
-            pwd = entry['password']
-            if force_visual:
-                print(f"PASSWORD: {pwd}")
-                VaultManager.smart_copy("")
-            else:
-                env = VaultManager.smart_copy(pwd)
-                print(f"[OK] Copied to {env}.") if env else print(f"PASSWORD: {pwd}")
-
             try:
+                if 'pwd_filename' in entry:
+                    pwd = VaultManager.load_password_file(entry['pwd_filename'])
+                else:
+                    pwd = entry.get('password')
+                
+                if not pwd:
+                    print("[!] Error: Password not found.")
+                    return
+
+                if force_visual:
+                    print(f"PASSWORD: {pwd}")
+                else:
+                    env = VaultManager.smart_copy(pwd)
+                    print(f"[OK] Copied to {env}.") if env else print(f"PASSWORD: {pwd}")
                 time.sleep(15)
                 VaultManager.secure_exit()
-            except KeyboardInterrupt:
+
+            except Exception as e:
+                print(f"[!] Error: {e}")
                 VaultManager.secure_exit()
+
+    @staticmethod
+    def add_entry(data):
+        svc = input("Service: ").strip()
+        
+        if any(e['service'].lower() == svc.lower() for e in data):
+            print(f"[!] Error: '{svc}' already exists.")
+            return
+
+        usr = input("User: ").strip()
+        pwd = VaultManager.get_confirmed_password()
+
+        seed = f"{svc}{time.time()}{usr}"
+        file_hash = hashlib.sha256(seed.encode()).hexdigest()[:16] + ".gpg"
+
+        try:
+            VaultManager.save_password_file(file_hash, pwd)
+            
+            data.append({
+                "service": svc,
+                "user": usr,
+                "pwd_filename": file_hash,
+                "updated_at": datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            })
+            
+            VaultManager.save_vault(data)
+            print(f"[+] '{svc}' added successfully.")
+            
+        except Exception as e:
+            print(f"[!] Error during add: {e}")
 
     @staticmethod
     def edit_entry(data):
@@ -178,8 +239,15 @@ class VaultManager:
             entry['user'] = input(f"New User [{entry['user']}]: ") or entry['user']
             
             if input("Change password? (y/N): ").lower() == 'y':
-                entry['password'] = VaultManager.get_confirmed_password()
-            
+                new_pwd = VaultManager.get_confirmed_password()
+                
+                if 'pwd_filename' not in entry:
+                    seed = f"{entry['service']}{time.time()}"
+                    entry['pwd_filename'] = hashlib.sha256(seed.encode()).hexdigest()[:16] + ".gpg"
+                
+                VaultManager.save_password_file(entry['pwd_filename'], new_pwd)
+                print("[+] Password file updated.")
+
             entry['updated_at'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             VaultManager.save_vault(data)
             print(f"[+] '{entry['service']}' updated.")
@@ -189,10 +257,14 @@ class VaultManager:
         idx = VaultManager._select_entry(data, None, "DELETE")
         if idx is not None:
             entry = data[idx]
-            print(f"\n[!] WARNING: You are about to delete {entry['service']} ({entry['user']})")
-            confirm = input(f"Confirm permanent deletion of '{entry['service']}'? (y/N): ").lower().strip()
+            confirm = input(f"Confirm deletion of '{entry['service']}'? (y/N): ").lower().strip()
             
             if confirm == 'y':
+                if 'pwd_filename' in entry:
+                    pwd_path = os.path.join(KEYS_DIR, entry['pwd_filename'])
+                    if os.path.exists(pwd_path):
+                        os.remove(pwd_path)
+                
                 data.pop(idx)
                 VaultManager.save_vault(data)
                 print(f"[+] '{entry['service']}' deleted.")
@@ -251,7 +323,10 @@ class VaultManager:
                 return []
                 
             try:
-                return json.loads(stdout)
+                data = json.loads(stdout)
+                if any('password' in e and 'pwd_filename' not in e for e in data):
+                    return VaultManager._perform_migration(stdout)
+                return data
             except json.JSONDecodeError:
                 return VaultManager._perform_migration(stdout)
                 
@@ -285,29 +360,49 @@ class VaultManager:
 
     @staticmethod
     def _perform_migration(stdout):
-        """Internal helper to convert legacy text format to JSON objects."""
-        print("[!] Legacy format detected. Migrating to JSON structure...")
+        print("[!] Migration to hybrid structure initiated...")
         migrated_data = []
-        for line in stdout.splitlines():
-            if not line.strip(): continue
-            try:
+        
+        try:
+            old_data = json.loads(stdout)
+        except json.JSONDecodeError:
+            old_data = []
+            for line in stdout.splitlines():
+                if not line.strip(): continue
                 parts = [p.strip() for p in line.split('|')]
-                svc = parts[0]
-                usr = parts[1].replace("User:", "").strip() if len(parts) > 1 else "Unknown"
-                pwd = parts[2].replace("PWD:", "").strip() if len(parts) > 2 else ""
+                if len(parts) >= 3:
+                    old_data.append({
+                        "service": parts[0],
+                        "user": parts[1].replace("User:", "").strip(),
+                        "password": parts[2].replace("PWD:", "").strip()
+                    })
+
+        for entry in old_data:
+            if 'password' in entry and 'pwd_filename' not in entry:
+                svc = entry['service']
+                pwd = entry['password']
                 
-                migrated_data.append({
-                    "service": svc,
-                    "user": usr,
-                    "password": pwd,
-                    "updated_at": datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                })
-            except Exception:
-                continue
+                seed = f"{svc}{time.time()}{secrets.token_hex(4)}"
+                file_hash = hashlib.sha256(seed.encode()).hexdigest()[:16] + ".gpg"
+                
+                try:
+                    VaultManager.save_password_file(file_hash, pwd)
+                    
+                    migrated_data.append({
+                        "service": svc,
+                        "user": entry.get('user', 'Unknown'),
+                        "pwd_filename": file_hash,
+                        "updated_at": entry.get('updated_at', datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+                    })
+                except Exception as e:
+                    print(f"[!] Migration failed for '{svc}': {e}")
+            else:
+                migrated_data.append(entry)
         
         if migrated_data:
             VaultManager.save_vault(migrated_data)
-            print("[+] Migration complete. Vault is now in JSON format.")
+            print(f"[+] Migration successful. {len(migrated_data)} entries processed.")
+            
         return migrated_data
 
 def main():
@@ -343,19 +438,7 @@ def main():
             term = input("\nSearch/Number: ")
             VaultManager.display_vault(data, term)
         elif c == '2':
-            svc = input("Service: ")
-            if any(e['service'].lower() == svc.lower() for e in data):
-                print(f"[!] Warning: '{svc}' already exists. Use Edit instead.")
-                return
-            usr = input("User: ")
-            pwd = VaultManager.get_confirmed_password()
-            data.append({
-                "service": svc,
-                "user": usr,
-                "password": pwd,
-                "updated_at": datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-            })
-            VaultManager.save_vault(data)
+            VaultManager.add_entry(data)
         elif c == '3':
             VaultManager.edit_entry(data)
         elif c == '4':
