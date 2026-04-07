@@ -38,6 +38,7 @@ fi
 echo "--- Setup Complete ---"
 echo "Next steps:"
 echo "1. Import your GPG keys: gpg --import your_private_key.asc"
-echo "2. Set your recipient email: export VAULT_RECIPIENT='your@email.com'"
-echo "3. Create your alias in ~/.bashrc alias vault='python3 ~/path/to/your/vault.py'"
-echo "4. Run the vault: python3 vault.py or vault"
+echo "2. Set your recipient email: export VAULT_RECIPIENT='your@email.com' in your .bashrc"
+echo "3. gpg --edit-key "your@mail.com" -> trust -> 5 -> y -> quit
+echo "4. Create your alias in ~/.bashrc alias vault='python3 ~/path/to/your/vault.py'"
+echo "5. Run the vault: python3 vault.py or vault"
