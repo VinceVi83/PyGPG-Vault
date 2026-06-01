@@ -20,6 +20,7 @@ if not os.path.exists(KEYS_DIR):
 RECIPIENT = "your@mail.com"
 
 # ln -s ~/storage/document/SyncDir/.vault.gpg ~/.vault.gpg
+# sudo apt install wamerican or wfrench
 # sudo apt update
 # sudo apt install python3 gnupg
 # gpg --import my_private_key.asc
@@ -35,6 +36,7 @@ class VaultManager:
     Methods:
         save_password_file(filename, password) : Encrypt and save a password to the vault.
         load_password_file(filename) : Decrypt and load a password from the vault.
+        generate_secure_passphrase(length=4) : Generate a secure passphrase from a local dictionary without accents or symbols inside words.
         generate_secure_password(length=20) : Generate a secure password with a given length.
         smart_copy(text) : Support clipboard operations across platforms.
         secure_exit() : Clear the clipboard and exit the program.
@@ -42,13 +44,13 @@ class VaultManager:
         display_vault(data, search_term, force_visual=False) : Display vault entries.
         edit_entry(data) : Edit a vault entry.
         delete_entry(data) : Delete a vault entry.
-        get_confirmed_password() : Generate and confirm a secure password with dynamic length support.
+        get_confirmed_password() : Generate and confirm a secure password or passphrase with dynamic length/word support.
         load_vault() : Decrypts GPG vault to JSON, handling agent cache or passphrase prompts.
         save_vault(data_list) : Encrypts JSON data via GPG and creates a safety .bak backup.
         _perform_migration(stdout) : Internal helper to convert legacy text format to JSON objects.
         add_entry(data) : Add a new vault entry.
     """
-    
+
     @staticmethod
     def save_password_file(filename, password):
         filepath = os.path.join(KEYS_DIR, filename)
@@ -65,6 +67,70 @@ class VaultManager:
             capture_output=True, text=True, check=True
         )
         return result.stdout.strip()
+
+    @staticmethod
+    def generate_secure_passphrase(length=4):
+        import unicodedata
+        
+        possible_paths = [
+            "/usr/share/dict/words"
+        ]
+        
+        secure_words = []
+        for path in possible_paths:
+            if os.path.exists(path):
+                with open(path, "r", encoding="utf-8") as f:
+                    raw_words = [line.strip() for line in f]
+                    
+                for word in raw_words:
+                    normalized = unicodedata.normalize('NFD', word)
+                    clean_word = "".join(c for c in normalized if not unicodedata.combining(c))
+                    
+                    if 4 <= len(clean_word) <= 8 and clean_word.isalpha() and "'" not in clean_word:
+                        secure_words.append(clean_word)
+                break
+
+        if not secure_words:
+            raise FileNotFoundError(
+                "\n[!] Dictionary file missing. Please install it using: sudo apt install wamerican or wfrench"
+            )
+
+        chosen_words = [secrets.choice(secure_words).lower() for _ in range(length)]
+        chosen_words = [m.capitalize() if secrets.choice([True, False]) else m for m in chosen_words]
+        
+        random_upper_idx = secrets.randbelow(len(chosen_words))
+        chosen_words[random_upper_idx] = chosen_words[random_upper_idx].upper()
+        
+        required_digit = secrets.choice(string.digits)
+        required_special = secrets.choice("!@#$%^&*")
+        
+        separators = [required_digit, required_special]
+        
+        separator_pool = ["-", "_"] + list(string.digits) + list("!@#$%^&*")
+        while len(separators) < (length - 1):
+            separators.append(secrets.choice(separator_pool))
+            
+        mixed_separators = []
+        while separators:
+            sep = secrets.choice(separators)
+            separators.remove(sep)
+            mixed_separators.append(sep)
+            
+        final_passphrase = chosen_words[0]
+        for i in range(len(mixed_separators)):
+            final_passphrase += mixed_separators[i] + chosen_words[i + 1]
+            
+        edge_choice = secrets.choice(["none", "start", "end", "both"])
+        extra_pool = list(string.digits) + list("!@#$%^&*")
+        
+        if edge_choice == "start":
+            final_passphrase = secrets.choice(extra_pool) + final_passphrase
+        elif edge_choice == "end":
+            final_passphrase = final_passphrase + secrets.choice(extra_pool)
+        elif edge_choice == "both":
+            final_passphrase = secrets.choice(extra_pool) + final_passphrase + secrets.choice(extra_pool)
+            
+        return final_passphrase
 
     @staticmethod
     def generate_secure_password(length=20):
@@ -274,25 +340,51 @@ class VaultManager:
     @staticmethod
     def get_confirmed_password():
         current_length = 25
+        is_passphrase_mode = False
+        word_count = 4
+
         while True:
-            candidate = VaultManager.generate_secure_password(current_length)
-            print(f"\nGenerated ({current_length} chars): {candidate}")
-            print("Options: [y] Accept | [n] Quit | [manual] Manual entry | [Number] Change length | [Enter] Retry")
+            if is_passphrase_mode:
+                candidate = VaultManager.generate_secure_passphrase(word_count)
+                print(f"\nGenerated Passphrase ({word_count} words): {candidate}")
+            else:
+                candidate = VaultManager.generate_secure_password(current_length)
+                print(f"\nGenerated Password ({current_length} chars): {candidate}")
+                
+            print("Options: [y] Accept | [n] Quit | [manual] Manual entry | [k] Passphrase mode | [p] Password mode | [Number] Change length/words | [Enter] Retry")
             choice = input("> ").lower().strip()
             
             if choice == 'y': 
-                return candidate
-            elif choice.isdigit():
-                new_len = int(choice)
-                if new_len < 4:
-                    print("[!] Length too short. Minimum is 4.")
+                pwd = candidate
+                if (any(c.islower() for c in pwd) and any(c.isupper() for c in pwd) and 
+                    any(c.isdigit() for c in pwd) and any(c in "!@#$%^&*" for c in pwd)):
+                    return candidate
                 else:
-                    current_length = new_len
+                    print("[!] Internal error: criteria unmet. Auto-retry...")
+            elif choice == 'k':
+                is_passphrase_mode = True
+            elif choice == 'p':
+                is_passphrase_mode = False
+            elif choice.startswith('k') and choice[1:].isdigit():
+                is_passphrase_mode = True
+                word_count = max(3, int(choice[1:]))
+            elif choice.isdigit():
+                val = int(choice)
+                if is_passphrase_mode:
+                    if val < 3:
+                        print("[!] Passphrase too short. Minimum 3 words.")
+                    else:
+                        word_count = val
+                else:
+                    if val < 4:
+                        print("[!] Length too short. Minimum is 4.")
+                    else:
+                        current_length = val
             elif choice == 'n': 
                 VaultManager.secure_exit()
             elif choice == 'manual': 
                 return getpass.getpass("Enter password: ")
-    
+
     @staticmethod
     def load_vault():
         if not os.path.exists(VAULT_FILE):
